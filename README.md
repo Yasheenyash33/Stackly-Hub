@@ -73,13 +73,12 @@ The Training Management System is designed to streamline the process of organizi
    d. Set up environment variables:
    Create a `.env` file in the backend directory:
    ```env
-   DB_USER=your_mysql_username
-   DB_PASSWORD=your_mysql_password
+   DB_USER=training_user
+   DB_PASSWORD=
    DB_HOST=localhost
    DB_PORT=3306
    DB_NAME=training_app
-   SECRET_KEY=your-secret-key-here
-   ```
+   SECRET_KEY=your-secret-key-here-change-this-in-production
 
 3. **Frontend Setup:**
 
@@ -90,6 +89,7 @@ The Training Management System is designed to streamline the process of organizi
 
    b. Install Node.js dependencies:
    ```bash
+   cd frontend
    npm install
    ```
 
