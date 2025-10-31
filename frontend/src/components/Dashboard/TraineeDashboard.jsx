@@ -1,0 +1,288 @@
+import React, { useState } from 'react';
+import { BookOpen, Clock, Award, TrendingUp, ExternalLink, Calendar } from 'lucide-react';
+import { useAuth } from '../../contexts/AuthContext';
+import { format } from 'date-fns';
+import { formatIST } from '../../utils/timezone';
+import toast from 'react-hot-toast';
+import { CalendarView } from '../CalendarView';
+
+export function TraineeDashboard() {
+  const { user, sessions, users, assignments, progress } = useAuth();
+  const [viewMode, setViewMode] = useState('dashboard'); // 'dashboard' or 'calendar'
+
+  // Sessions are now filtered on backend, so all sessions are already assigned to this trainee
+  const mySessions = sessions;
+  const upcomingSessions = mySessions.filter(s => s.status === 'scheduled');
+  const completedSessions = mySessions.filter(s => s.status === 'completed');
+
+  const myAssignment = assignments.find(a => a.student.id === user.id);
+  const myTrainer = myAssignment ? users.find(u => u.id === myAssignment.teacher.id) : null;
+
+  const stats = [
+    {
+      name: 'Total Sessions',
+      value: mySessions.length,
+      icon: BookOpen,
+      color: 'bg-green-600',
+    },
+    {
+      name: 'Upcoming',
+      value: upcomingSessions.length,
+      icon: Clock,
+      color: 'bg-blue-600',
+    },
+    {
+      name: 'Completed',
+      value: completedSessions.length,
+      icon: Award,
+      color: 'bg-amber-600',
+    },
+    {
+      name: 'Progress',
+      value: `${mySessions.length ? Math.round((completedSessions.length / mySessions.length) * 100) : 0}%`,
+      icon: TrendingUp,
+      color: 'bg-purple-600',
+    }
+  ];
+
+  const handleJoinSession = (session) => {
+    if (session.sessionLink) {
+      // Use the session link to join via backend
+      window.open(`${window.location.origin}/join/${session.sessionLink}`, '_blank');
+      toast.success('Joining session...');
+    } else if (session.classLink) {
+      // Fallback to direct class link if no session link
+      window.open(session.classLink, '_blank');
+      toast.success('Joining session...');
+    } else {
+      toast.error('Session link not available');
+    }
+  };
+
+  const handleSessionClick = (session) => {
+    // Handle session click - could open a modal or navigate to session details
+    console.log('Session clicked:', session);
+  };
+
+  return (
+    <div className="space-y-8">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-white">My Learning Dashboard</h1>
+          <p className="mt-2 text-gray-400">Track your progress and upcoming sessions</p>
+        </div>
+        <div className="flex items-center space-x-2">
+          <button
+            onClick={() => setViewMode('dashboard')}
+            className={`px-4 py-2 rounded-lg transition-colors ${
+              viewMode === 'dashboard'
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+            }`}
+          >
+            Dashboard
+          </button>
+          <button
+            onClick={() => setViewMode('calendar')}
+            className={`px-4 py-2 rounded-lg transition-colors flex items-center space-x-2 ${
+              viewMode === 'calendar'
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+            }`}
+          >
+            <Calendar className="h-4 w-4" />
+            <span>Calendar</span>
+          </button>
+        </div>
+      </div>
+
+      {viewMode === 'calendar' ? (
+        <CalendarView
+          sessions={mySessions}
+          user={user}
+          onSessionClick={handleSessionClick}
+        />
+      ) : (
+        <>
+
+      {/* Stats Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        {stats.map((stat) => (
+          <div key={stat.name} className="bg-gray-800 border border-gray-700 rounded-lg p-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-gray-400 text-sm font-medium">{stat.name}</p>
+                <p className="text-2xl font-bold text-white mt-2">{stat.value}</p>
+              </div>
+              <div className={`${stat.color} rounded-full p-3`}>
+                <stat.icon className="h-6 w-6 text-white" />
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Progress Overview */}
+      <div className="bg-gray-800 border border-gray-700 rounded-lg p-6">
+        <h3 className="text-lg font-semibold text-white mb-4">Learning Progress</h3>
+        <div className="space-y-6">
+          {/* Overall Progress */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-gray-300 text-sm font-medium">Overall Completion</span>
+              <span className="text-green-400 text-sm font-medium">
+                {mySessions.length ? Math.round((completedSessions.length / mySessions.length) * 100) : 0}%
+              </span>
+            </div>
+            <div className="w-full bg-gray-700 rounded-full h-2">
+              <div
+                className="bg-green-600 h-2 rounded-full transition-all duration-500"
+                style={{
+                  width: `${mySessions.length ? (completedSessions.length / mySessions.length) * 100 : 0}%`
+                }}
+              ></div>
+            </div>
+          </div>
+
+          {/* My Trainer */}
+          {myTrainer && (
+            <div className="bg-gray-700 border border-gray-600 rounded-lg p-4">
+              <h4 className="text-white font-medium mb-2">My Trainer</h4>
+              <div className="flex items-center space-x-3">
+                <div className="w-8 h-8 bg-green-600 rounded-full flex items-center justify-center">
+                  <span className="text-white text-sm font-medium">
+                    {myTrainer.name.charAt(0)}
+                  </span>
+                </div>
+                <div>
+                  <p className="text-white font-medium">{myTrainer.name}</p>
+                  <p className="text-gray-400 text-sm">{myTrainer.email}</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Quick Stats */}
+          <div className="grid grid-cols-2 gap-4">
+            <div className="text-center">
+              <p className="text-2xl font-bold text-white">{completedSessions.length}</p>
+              <p className="text-gray-400 text-sm">Completed</p>
+            </div>
+            <div className="text-center">
+              <p className="text-2xl font-bold text-white">{upcomingSessions.length}</p>
+              <p className="text-gray-400 text-sm">Upcoming</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* My Sessions */}
+      <div className="bg-gray-800 border border-gray-700 rounded-lg p-6">
+        <h3 className="text-lg font-semibold text-white mb-4">My Sessions</h3>
+        <div className="space-y-4">
+          {mySessions.length === 0 ? (
+            <p className="text-gray-400 text-sm">No sessions found. You haven't been assigned to any sessions yet.</p>
+          ) : (
+            // Sort sessions: upcoming first, then by date
+            [...mySessions].sort((a, b) => {
+              const aIsUpcoming = a.status === 'scheduled';
+              const bIsUpcoming = b.status === 'scheduled';
+              if (aIsUpcoming && !bIsUpcoming) return -1;
+              if (!aIsUpcoming && bIsUpcoming) return 1;
+              return new Date(a.startTime) - new Date(b.startTime);
+            }).map((session) => {
+              const trainer = users.find(u => u.id === session.trainer);
+              const attendance = session.attendance && session.attendance[user.id];
+              const statusColor = session.status === 'completed' ? 'bg-green-600' : session.status === 'cancelled' ? 'bg-red-600' : 'bg-blue-600';
+              const isUpcoming = session.status === 'scheduled';
+              return (
+                <div key={session.id} className="bg-gray-700 border border-gray-600 rounded-lg p-4">
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1">
+                      <div className="flex items-center space-x-2 mb-2">
+                        <h4 className="font-medium text-white">{session.title}</h4>
+                        <span className={`text-xs px-2 py-1 rounded text-white ${statusColor}`}>
+                          {session.status}
+                        </span>
+                      </div>
+                      <p className="text-gray-300 text-sm mb-2">{session.description}</p>
+                      <div className="flex items-center space-x-4 text-gray-400 text-sm">
+                        <p>Scheduled: {formatIST(session.startTime, 'datetime')}</p>
+                        <p>by {trainer?.name}</p>
+                        <p>Duration: {session.duration_minutes} min</p>
+                      </div>
+                      {isUpcoming && session.classLink && (
+                        <button
+                          onClick={() => handleJoinSession(session)}
+                          className="mt-2 bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm flex items-center space-x-1 transition-colors duration-200"
+                        >
+                          <span>Join</span>
+                          <ExternalLink className="h-3 w-3" />
+                        </button>
+                      )}
+                    </div>
+                    {attendance && (
+                      <div className="ml-4">
+                        {attendance.present ? (
+                          <span className="bg-green-600 text-white text-xs px-2 py-1 rounded">
+                            Attended
+                          </span>
+                        ) : (
+                          <span className="bg-red-600 text-white text-xs px-2 py-1 rounded">
+                            Absent
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+          {/* Recent Completed Sessions */}
+          <div className="bg-gray-800 border border-gray-700 rounded-lg p-6">
+            <h3 className="text-lg font-semibold text-white mb-4">Recently Completed</h3>
+            <div className="space-y-4">
+              {completedSessions.slice(0, 5).map((session) => {
+                const trainer = users.find(u => u.id === session.trainer);
+                const attendance = session.attendance[user.id];
+
+                return (
+                  <div key={session.id} className="flex items-center justify-between bg-gray-700 border border-gray-600 rounded-lg p-4">
+                    <div className="flex items-center space-x-4">
+                      <div className="w-2 h-2 bg-green-400 rounded-full"></div>
+                      <div>
+                        <h4 className="font-medium text-white">{session.title}</h4>
+                        <p className="text-gray-400 text-sm">
+                          Created: {formatIST(session.createdAt, 'datetime')} • by {trainer?.name}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      {attendance?.present ? (
+                        <span className="bg-green-600 text-white text-xs px-2 py-1 rounded">
+                          Attended
+                        </span>
+                      ) : (
+                        <span className="bg-red-600 text-white text-xs px-2 py-1 rounded">
+                          Absent
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {completedSessions.length === 0 && (
+                <p className="text-gray-400 text-sm">No completed sessions yet</p>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

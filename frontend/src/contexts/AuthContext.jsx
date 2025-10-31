@@ -1,0 +1,719 @@
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+
+const AuthContext = createContext({});
+
+const API_BASE_URL = 'http://localhost:8002';
+const WS_BASE_URL = 'ws://localhost:8002';
+
+// Update WebSocket connection
+const connectWebSocket = () => {
+  const ws = new WebSocket(`${WS_BASE_URL}/ws`);
+  
+  ws.onopen = () => {
+    console.log('WebSocket Connected');
+  };
+
+  ws.onerror = (error) => {
+    console.error('WebSocket Error:', error);
+    // Attempt to reconnect after 5 seconds
+    setTimeout(connectWebSocket, 5000);
+  };
+
+  ws.onclose = () => {
+    console.log('WebSocket Disconnected');
+    // Attempt to reconnect after 5 seconds
+    setTimeout(connectWebSocket, 5000);
+  };
+
+  return ws;
+};
+
+export function AuthProvider({ children }) {
+  const [user, setUser] = useState(null);
+  const [users, setUsers] = useState([]);
+  const [sessions, setSessions] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [token, setToken] = useState(null);
+  const [ws, setWs] = useState(null);
+  const [assignments, setAssignments] = useState([]);
+  const [attendance, setAttendance] = useState([]);
+  const [progress, setProgress] = useState([]);
+  const [isDataLoading, setIsDataLoading] = useState(false);
+
+  // Helper to attach auth header
+  const authHeaders = useCallback(() => ({
+    'Content-Type': 'application/json',
+    Authorization: token ? `Bearer ${token}` : '',
+  }), [token]);
+
+  // Logout function
+  const logout = useCallback(() => {
+    setUser(null);
+    setToken(null);
+    setUsers([]);
+    setSessions([]);
+    setNotifications([]);
+    localStorage.removeItem('user');
+    localStorage.removeItem('token');
+    if (ws) {
+      ws.close();
+      setWs(null);
+    }
+  }, []);
+  // Fetch initial data from backend
+  const fetchInitialData = useCallback(async () => {
+    if (!token || !user) return;
+    console.log('fetchInitialData called');
+    setIsDataLoading(true);
+    try {
+      const fetches = [
+      fetch(`${API_BASE_URL}/sessions/`, { headers: authHeaders() }),
+      fetch(`${API_BASE_URL}/assignments/`, { headers: authHeaders() }),
+      ];
+      let usersPromise = null;
+      if (user.role === 'admin' || user.role === 'trainer' || user.role === 'trainee') {
+        usersPromise = fetch(`${API_BASE_URL}/users/`, { headers: authHeaders() });
+        fetches.push(usersPromise);
+      }
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Request timeout')), 10000);
+      });
+      const responses = await Promise.race([Promise.all(fetches), timeoutPromise]);
+      const sessionsRes = responses[0];
+      const assignmentsRes = responses[1];
+      const usersRes = responses.length > 2 ? responses[2] : null;
+
+      if (!sessionsRes.ok) {
+        if (sessionsRes.status === 401) {
+          console.warn('Unauthorized to fetch sessions, logging out');
+          logout();
+          return;
+        }
+        throw new Error('Failed to fetch sessions');
+      }
+      const sessionsData = await sessionsRes.json();
+      // Map session data for frontend consistency
+      const mappedSessions = sessionsData.map(session => ({
+        ...session,
+        trainer: session.trainer_id,
+        trainees: session.trainees.map(t => t.id),
+        startTime: session.scheduled_date,
+        createdAt: session.created_at
+      }));
+      setSessions(mappedSessions);
+
+      if (!assignmentsRes.ok) {
+        setAssignments([]);
+      } else {
+        const assignmentsData = await assignmentsRes.json();
+        setAssignments(assignmentsData);
+      }
+
+      if (usersRes) {
+        if (!usersRes.ok) {
+          if (usersRes.status === 401) {
+            console.warn('Unauthorized to fetch users, logging out');
+            logout();
+            return;
+          }
+          if (usersRes.status === 403) {
+            console.warn('Not authorized to fetch users');
+            setUsers([]);
+          } else {
+            throw new Error('Failed to fetch users');
+          }
+        } else {
+          const usersData = await usersRes.json();
+          setUsers(usersData);
+        }
+      }
+      console.log('fetchInitialData completed successfully');
+    } catch (error) {
+      console.error('Error fetching initial data:', error);
+      // Set empty data on error
+      setSessions([]);
+      setAssignments([]);
+      if (user.role === 'admin' || user.role === 'trainer') {
+        setUsers([]);
+      }
+    } finally {
+      setIsDataLoading(false);
+    }
+  }, [token, user, authHeaders, logout]);
+  
+  // Helper function to check if a session should be visible to the current user
+  const isSessionVisible = useCallback((sessionData) => {
+    if (!user) return false;
+
+    if (user.role === 'admin') {
+      return true; // Admins see all sessions
+    } else if (user.role === 'trainer') {
+      return sessionData.trainer === user.id; // Trainers see only their sessions
+    } else if (user.role === 'trainee') {
+      return (sessionData.trainees || []).includes(user.id); // Trainees see only sessions they're assigned to
+    }
+    return false;
+  }, [user]);
+
+  // WebSocket message handler
+  const handleWsMessage = useCallback((event) => {
+    try {
+      const message = JSON.parse(event.data);
+      switch (message.type) {
+        case 'user_created':
+          setUsers(prev => [...prev, message.data.user]);
+          break;
+        case 'user_updated':
+          setUsers(prev => prev.map(u => u.id === message.data.user_id ? message.data.user : u));
+          if (user && user.id === message.data.user_id) {
+            setUser(message.data.user);
+          }
+          break;
+        case 'user_deleted':
+          setUsers(prev => prev.filter(u => u.id !== message.data.user_id));
+          if (user && user.id === message.data.user_id) {
+            logout();
+          }
+          break;
+        case 'session_created':
+          // Only add session if it's visible to current user
+          if (isSessionVisible(message.data)) {
+            setSessions(prev => [...prev, message.data]);
+          }
+          break;
+        case 'session_updated':
+          setSessions(prev => prev.map(s => {
+            if (s.id === message.data.session_id) {
+              const updatedSession = {
+                ...s,
+                status: message.data.status,
+                updated_at: message.data.updated_at,
+                trainees: message.data.trainees || s.trainees,
+                trainer: message.data.trainer || s.trainer,
+                startTime: message.data.startTime || s.startTime
+              };
+              // Check if session is still visible after update
+              return isSessionVisible(updatedSession) ? updatedSession : null;
+            }
+            return s;
+          }).filter(Boolean)); // Remove null entries (sessions no longer visible)
+          break;
+        case 'session_deleted':
+          setSessions(prev => prev.filter(s => s.id !== message.data.session_id));
+          break;
+        case 'trainee_added_to_session':
+          setSessions(prev => prev.map(s => {
+            if (s.id === message.data.session_id) {
+              const updatedTrainees = [...(s.trainees || []), message.data.trainee_id];
+              const updatedSession = { ...s, trainees: updatedTrainees };
+              // If current user is a trainee and was added, or if session becomes visible
+              if (user.role === 'trainee' && message.data.trainee_id === user.id) {
+                return updatedSession;
+              } else if (isSessionVisible(updatedSession)) {
+                return updatedSession;
+              } else {
+                return null; // Remove if no longer visible
+              }
+            }
+            return s;
+          }).filter(Boolean));
+          break;
+        case 'trainee_removed_from_session':
+          setSessions(prev => prev.map(s => {
+            if (s.id === message.data.session_id) {
+              const updatedTrainees = (s.trainees || []).filter(id => id !== message.data.trainee_id);
+              const updatedSession = { ...s, trainees: updatedTrainees };
+              // If current user is a trainee and was removed, or if session is no longer visible
+              if (user.role === 'trainee' && message.data.trainee_id === user.id) {
+                return null; // Remove session from trainee's view
+              } else if (isSessionVisible(updatedSession)) {
+                return updatedSession;
+              } else {
+                return null; // Remove if no longer visible
+              }
+            }
+            return s;
+          }).filter(Boolean));
+          break;
+        case 'student_assigned':
+        case 'student_unassigned':
+          // Fetch updated assignments
+          fetch(`${API_BASE_URL}/assignments/`, { headers: authHeaders() })
+            .then(res => res.json())
+            .then(data => setAssignments(data))
+            .catch(err => console.error('Error fetching assignments:', err));
+          break;
+        case 'notification':
+          // Add notification if it's for the current user
+          if (user && message.data.user_id === user.id) {
+            setNotifications(prev => [{
+              id: Date.now(), // Simple ID generation
+              ...message.data,
+              read: false,
+              timestamp: new Date(message.data.timestamp)
+            }, ...prev]);
+          }
+          break;
+        default:
+          console.warn('Unknown WebSocket message type:', message.type);
+      }
+    } catch (error) {
+      console.error('Error handling WebSocket message:', error);
+    }
+  }, [user, logout, authHeaders, isSessionVisible]);
+
+  // Setup WebSocket connection with reconnection
+  useEffect(() => {
+    if (!token) return;
+
+    let socket;
+    let reconnectTimeout;
+
+    const connect = () => {
+      socket = new WebSocket(`${WS_BASE_URL}/ws?token=${token}`);
+      socket.onopen = () => {
+        console.log('WebSocket connected');
+        setWs(socket);
+      };
+      socket.onmessage = handleWsMessage;
+      socket.onclose = (event) => {
+        console.log('WebSocket disconnected', event.code, event.reason);
+        setWs(null);
+        if (!event.wasClean && token) {
+          // Reconnect after 5 seconds
+          reconnectTimeout = setTimeout(connect, 5000);
+        }
+      };
+      socket.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        socket.close();
+      };
+    };
+
+    connect();
+
+    return () => {
+      if (socket) socket.close();
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+    };
+  }, [token, handleWsMessage]);
+
+  // Fetch initial data on token change
+  useEffect(() => {
+    fetchInitialData();
+  }, [fetchInitialData]);
+
+  // Load user and token from localStorage on mount
+  useEffect(() => {
+    const storedUser = localStorage.getItem('user');
+    const storedToken = localStorage.getItem('token');
+    if (storedUser && storedToken) {
+      try {
+        const parsedUser = JSON.parse(storedUser);
+        console.log('Loaded from localStorage, user:', parsedUser, 'role:', parsedUser.role);
+        setUser(parsedUser);
+        setToken(storedToken);
+      } catch (e) {
+        console.error('Failed to parse stored user/token:', e);
+        localStorage.removeItem('user');
+        localStorage.removeItem('token');
+      }
+    }
+    setLoading(false);
+  }, []);
+
+  // Login function
+  const login = async (username, password) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        return { success: false, error: errorData.detail || 'Login failed' };
+      }
+      const data = await res.json();
+      console.log('Login successful, user:', data.user, 'role:', data.user.role);
+      setUser(data.user);
+      setToken(data.access_token);
+      localStorage.setItem('user', JSON.stringify(data.user));
+      localStorage.setItem('token', data.access_token);
+      return { success: true, forcePasswordChange: data.force_password_change };
+    } catch (error) {
+      console.error('Login error:', error);
+      return { success: false, error: 'Login error' };
+    }
+  };
+
+  // Change password function
+  const changePassword = async (newPassword, currentPassword = null) => {
+    if (!token) return { success: false, error: 'No token' };
+    try {
+      const body = { new_password: newPassword };
+      if (currentPassword) {
+        body.current_password = currentPassword;
+      }
+      const res = await fetch(`${API_BASE_URL}/auth/change-password`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        return { success: false, error: errorData.detail || 'Failed to change password' };
+      }
+      const data = await res.json();
+      // Update user state to reflect password changed
+      setUser(prev => prev ? { ...prev, is_temporary_password: false } : null);
+      localStorage.setItem('user', JSON.stringify({ ...user, is_temporary_password: false }));
+      return { success: true };
+    } catch (error) {
+      console.error('Change password error:', error);
+      return { success: false, error: 'Change password error' };
+    }
+  };
+
+  // Reset password function (admin only)
+  const resetPassword = async (userId, newPassword) => {
+    if (!token) return { success: false, error: 'No token' };
+    try {
+      const res = await fetch(`${API_BASE_URL}/auth/reset-password/${userId}`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ new_password: newPassword }),
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        return { success: false, error: errorData.detail || 'Failed to reset password' };
+      }
+      const data = await res.json();
+      // Update user state if resetting current user
+      if (user && user.id === userId) {
+        setUser(prev => prev ? { ...prev, is_temporary_password: true } : null);
+        localStorage.setItem('user', JSON.stringify({ ...user, is_temporary_password: true }));
+      }
+      return { success: true, message: data.message };
+    } catch (error) {
+      console.error('Reset password error:', error);
+      return { success: false, error: 'Reset password error' };
+    }
+  };
+
+
+
+  // Helper to check backend connectivity and token presence
+  const checkBackendAndToken = async () => {
+    if (!token) {
+      const msg = 'No authentication token found. Please login as admin.';
+      console.error(msg);
+      if (window.toast) {
+        window.toast.error(msg);
+      } else {
+        alert(msg);
+      }
+      return false;
+    }
+    try {
+      const res = await fetch(`${API_BASE_URL}/health`, {
+        method: 'GET',
+        headers: authHeaders(),
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        const msg = errorData.detail || 'Backend health check failed';
+        console.error(msg);
+        if (window.toast) {
+          window.toast.error(msg);
+        } else {
+          alert(msg);
+        }
+        return false;
+      }
+      return true;
+    } catch (error) {
+      const msg = 'Failed to connect to backend. Please ensure the backend server is running.';
+      console.error(msg, error);
+      if (window.toast) {
+        window.toast.error(msg);
+      } else {
+        alert(msg);
+      }
+      return false;
+    }
+  };
+
+  // Create user via API
+  const createUser = async (userData) => {
+    console.log('Creating user, current user role:', user ? user.role : 'no user', 'token:', token ? 'present' : 'missing');
+    const canProceed = await checkBackendAndToken();
+    if (!canProceed) return null;
+    try {
+      const res = await fetch(`${API_BASE_URL}/users/`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify(userData),
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        let errorMessage = 'Failed to create user';
+        if (errorData.detail) {
+          if (Array.isArray(errorData.detail)) {
+            errorMessage = errorData.detail.map(err => `${err.loc.join('.')}: ${err.msg}`).join(', ');
+          } else {
+            errorMessage = errorData.detail;
+          }
+        }
+        throw new Error(errorMessage);
+      }
+      const responseData = await res.json();
+      // Update users state immediately for immediate UI update
+      setUsers(prev => [...prev, responseData.user]);
+      return responseData;
+    } catch (error) {
+      console.error('Create user error:', error.message || error);
+      // Show user-friendly error message
+      if (error.message.includes('Only admins can create users')) {
+        // Use toast if available, else alert
+        if (window.toast) {
+          window.toast.error('Only administrators can create users. Please contact an admin.');
+        } else {
+          alert('Only administrators can create users. Please contact an admin.');
+        }
+      } else {
+        if (window.toast) {
+          window.toast.error(error.message || 'Failed to create user');
+        } else {
+          alert(error.message || 'Failed to create user');
+        }
+      }
+      return null;
+    }
+  };
+
+  // Update user via API
+  const updateUserById = async (id, updates) => {
+    if (!token) return null;
+    try {
+      const res = await fetch(`${API_BASE_URL}/users/${id}`, {
+        method: 'PUT',
+        headers: authHeaders(),
+        body: JSON.stringify(updates),
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || 'Failed to update user');
+      }
+      const updatedUser = await res.json();
+      // WebSocket will update state
+      return updatedUser;
+    } catch (error) {
+      console.error('Update user error:', error);
+      return null;
+    }
+  };
+
+  // Delete user via API
+  const deleteUser = async (id) => {
+    if (!token) return false;
+    try {
+    const res = await fetch(`${API_BASE_URL}/users/${id}`, {
+      method: 'DELETE',
+      headers: authHeaders(),
+    });
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || 'Failed to delete user');
+      }
+      // Update state immediately for instant UI feedback
+      setUsers(prev => prev.filter(u => u.id !== id));
+      // WebSocket will also update state if connected
+      return true;
+    } catch (error) {
+      console.error('Delete user error:', error);
+      return false;
+    }
+  };
+
+  // Create session via API
+  const createSession = async (sessionData) => {
+    if (!token) return null;
+    try {
+      const res = await fetch(`${API_BASE_URL}/sessions/`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify(sessionData),
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || 'Failed to create session');
+      }
+      const newSession = await res.json();
+      // WebSocket will update state
+      return newSession;
+    } catch (error) {
+      console.error('Create session error:', error);
+      return null;
+    }
+  };
+
+  // Update session via API
+  const updateSession = async (id, updates) => {
+    if (!token) return null;
+    try {
+      const res = await fetch(`${API_BASE_URL}/sessions/${id}`, {
+        method: 'PUT',
+        headers: authHeaders(),
+        body: JSON.stringify(updates),
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || 'Failed to update session');
+      }
+      const updatedSession = await res.json();
+      // WebSocket will update state
+      return updatedSession;
+    } catch (error) {
+      console.error('Update session error:', error);
+      return null;
+    }
+  };
+
+  // Delete session via API
+  const deleteSession = async (id) => {
+    if (!token) return false;
+    try {
+      const res = await fetch(`${API_BASE_URL}/sessions/${id}`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        if (errorData.detail && errorData.detail.includes('Only admins can delete sessions')) {
+          if (window.toast) {
+            window.toast.error('Only administrators can delete sessions. Please contact an admin.');
+          } else {
+            alert('Only administrators can delete sessions. Please contact an admin.');
+          }
+        }
+        throw new Error(errorData.detail || 'Failed to delete session');
+      }
+      // WebSocket will update state
+      return true;
+    } catch (error) {
+      console.error('Delete session error:', error);
+      return false;
+    }
+  };
+
+  // Assign student to teacher
+  const assignStudent = async (studentId, teacherId) => {
+    if (!token) return null;
+    try {
+      const res = await fetch(`${API_BASE_URL}/assignments/`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ student_id: studentId, teacher_id: teacherId }),
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || 'Failed to assign student');
+      }
+      const assignment = await res.json();
+      // WebSocket will update state
+      return assignment;
+    } catch (error) {
+      console.error('Assign student error:', error.message);
+      throw error;
+    }
+  };
+
+  // Unassign student from teacher
+  const unassignStudent = async (studentId, teacherId) => {
+    if (!token) return false;
+    try {
+      const res = await fetch(`${API_BASE_URL}/assignments/${studentId}/${teacherId}`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || 'Failed to unassign student');
+      }
+      // WebSocket will update state
+      return true;
+    } catch (error) {
+      console.error('Unassign student error:', error);
+      return false;
+    }
+  };
+
+  // Mark notification as read function
+  const markNotificationAsRead = useCallback((notificationId) => {
+    setNotifications(prev => prev.map(n =>
+      n.id === notificationId ? { ...n, read: true } : n
+    ));
+  }, []);
+
+  // Provide context value
+  const value = {
+    user,
+    users,
+    sessions,
+    assignments,
+    notifications,
+    loading,
+    isDataLoading,
+    token,
+    login,
+    logout,
+    changePassword,
+    resetPassword,
+    createUser,
+    updateUserById,
+    deleteUser,
+    createSession,
+    updateSession,
+    deleteSession,
+    assignStudent,
+    unassignStudent,
+    markNotificationAsRead,
+    fetchInitialData,
+  };
+
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+// Custom hook to use AuthContext
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
+  return context;
+};
+
+const fetchData = async (endpoint) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('Fetch error:', error);
+    throw error;
+  }
+};
