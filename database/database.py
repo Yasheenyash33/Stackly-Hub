@@ -1,10 +1,9 @@
-import os
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-# Database connection URL using environment variables
-SQLALCHEMY_DATABASE_URL = f"mysql+pymysql://{os.getenv('DB_USER', 'training_user')}:{os.getenv('DB_PASSWORD', '')}@{os.getenv('DB_HOST', 'localhost')}:{os.getenv('DB_PORT', '3306')}/{os.getenv('DB_NAME', 'training_app')}"
+# Database connection URL with user credentials (empty password)
+SQLALCHEMY_DATABASE_URL = "mysql+pymysql://training_user:@localhost/training_app"
 
 # Create engine
 engine = create_engine(
